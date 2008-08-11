@@ -2962,8 +2962,8 @@ RADEONDisplayVideo(
  * this delimits 'maximum voltage' being fed into our software PLL.
  */
 #define VBL_MAX_TRIM_ABS 37
-#define VBL_MIN_TRIM_ABS 27
-#define VBL_RSYNC_FPOLAR 80
+#define VBL_MIN_TRIM_ABS 37
+#define VBL_RSYNC_FPOLAR 140
 
 /*
  * field polarity correction is clearly a task of the calling layer
