@@ -2980,7 +2980,7 @@ RADEONDisplayVideo(
  *
  *  at most one of both methods is allowed at any time
  */
-#define RESYNC_FIELD_POLARITY_METHOD1
+//#define RESYNC_FIELD_POLARITY_METHOD1
 //#define RESYNC_FIELD_POLARITY_METHOD2
 
 //#define DEBUG
@@ -3054,13 +3054,14 @@ RADEONDisplayVideo(
         } else {
 #endif
             VBL_SUB(vsync.tv_now, vsync.tv_vbl, skew)
-            sync_point_disp += skew.tv_usec - SYNC_POINT;
             if (skew_prev.tv_sec != ~0) {
+		sync_point_disp += skew.tv_usec - SYNC_POINT;
                 VBL_SUB(skew, skew_prev, drift_speed);
                 VBL_TV2USEC(drift_speed, tmp);
                 ds_usecs += tmp;
+		++cnt;
             }
-            if (!(cnt++ % SYNC_PLL_DIVIDER) && skew_prev.tv_sec != ~0) {
+            if (skew_prev.tv_sec != ~0 && !(cnt % SYNC_PLL_DIVIDER)) {
                 sync_point_disp /= SYNC_PLL_DIVIDER;
 #ifdef RESYNC_FIELD_POLARITY_METHOD2
                 if (vsync.vbls & 1 && B(1)) {
