@@ -16,6 +16,7 @@
 #include <sys/ioctl.h>
 #include <xf86drm.h>
 #include <drm/radeon_drm.h>
+extern void vga_sync_fields();
 #endif
 
 #include "radeon.h"
@@ -2913,190 +2914,6 @@ RADEONDisplayVideo(
 
     OUTREG(RADEON_OV0_SCALE_CNTL, scale_cntl);
     OUTREG(RADEON_OV0_REG_LOAD_CNTL, 0);
-
-#ifdef SYNC_FIELDS
-
-/*
- * prefilter to prevent stray updates.
- * our software PLL will not try to lock for these.
- */
-#define SYNC_FRAME_CYCLE 40000
-#define SYNC_FIELD_CYCLE 20000
-#define SYNC_CATCH_RANGE 10000
-
-/* --8<-- */
-/*
- * we average 25 frames to yield a cycle time of
- * about one second for analysis of frame rate data.
- * this serves as frequency divider for our software PLL.
- */
-#ifdef STANDALONE
-#define SYNC_PLL_DIVIDER 1
-#else
-#define SYNC_PLL_DIVIDER 25
-#endif
-
-/*
- * offset in usecs from double buffer switch where we try to place double
- * buffer updates.
- * this lowers sensivity to jitter of our software PLL phase comparator.
- */
-#define SYNC_POINT 10000
-
-/*
- * one trim increment compensates drift speed for about 29usec/sec.
- * this represents resolution of our VCO input. 
- */
-#define VBL_MIN_STEP_USEC 29
-
-/* NOT CURRENTLY USED
- * to allow for smooth adaption also on slower devices we delimit maximum
- * trim change per step size.
- * this implements some kind of low pass filter for our VCO input.
- */
-#define VBL_MAX_TRIM_REL 1000
-
-/*
- * maximum absolute trim values allowed due to current
- * hardware/driver contraints.
- * this delimits 'maximum voltage' being fed into our software PLL.
- */
-#define VBL_MAX_TRIM_ABS 37
-#define VBL_MIN_TRIM_ABS 37
-#define VBL_RSYNC_FPOLAR 140
-
-/*
- * field polarity correction is clearly a task of the calling layer
- * but for the moment we want to provide an all-in-one solution
- *
- *  METHOD1 (fast):
- *  tries to resynchronize field polarity in one fell swoop 
- *  by heavily incrementing the frame rate for a moment.
- *  this effectively drops a field.
- *
- *  METHOD2 (slow):
- *  continuously increments frame rate until a field
- *  has been skipped. 
- *
- *  at most one of both methods is allowed at any time
- */
-//#define RESYNC_FIELD_POLARITY_METHOD1
-//#define RESYNC_FIELD_POLARITY_METHOD2
-
-//#define DEBUG
-#ifdef DEBUG
-#define ERRORF ErrorF
-#else
-#define ERRORF(...)
-#endif
-
-#ifdef STANDALONE
-#define ErrorF printf
-#define B(a) (*(argv + (a)) ? *(argv + (a)) : 0)
-#else
-#define B(a) (a)
-#endif
-/* --8<-- */
-
-{
-    static int fd;
-    static int cnt;
-    static int ds_usecs;
-    static int sync_point_disp;
-    static struct timeval skew_prev;
-    static drm_radeon_vsync_t vsync_prev;
-    drm_radeon_vsync_t vsync;
-    drm_radeon_setparam_t vbl_activate;
-    struct timeval filter;
-    struct timeval skew;
-    struct timeval drift_speed;
-    int tmp;
-
-    if (!fd) {
-        if ((fd = drmOpen("radeon", 0)) < 0) {
-            ErrorF("drmOpen: %s\n", strerror(errno));
-        }
-        vbl_activate.param = RADEON_SETPARAM_VBLANK_CRTC;
-        vbl_activate.value = DRM_RADEON_VBLANK_CRTC1;
-        if (ioctl(fd, DRM_IOCTL_RADEON_SETPARAM, &vbl_activate)) {
-            ErrorF("DRM_IOCTL_RADEON_SETPARAM: %s\n", strerror(errno));
-        }
-    }
-    vsync.trim = 0;
-    if (ioctl(fd, DRM_IOCTL_RADEON_VSYNC, &vsync)) {
-        ErrorF("DRM_IOCTL_RADEON_VSYNC: %s\n", strerror(errno));
-    }
-    VBL_SUB(vsync.tv_now, vsync_prev.tv_now, filter);
-    if (filter.tv_sec 
-     || filter.tv_usec > SYNC_FRAME_CYCLE + SYNC_CATCH_RANGE 
-     || filter.tv_usec < SYNC_FRAME_CYCLE - SYNC_CATCH_RANGE) {
-
-	/*
-	 * toss stray intervals and reset
-	 */
-        cnt = 0;
-	ds_usecs = 0;
-        sync_point_disp = 0;
-	skew_prev.tv_sec = ~0;
-
-	ERRORF("RESET STRAY\n");
-    } else {
-
-/* --8<-- */
-#ifdef RESYNC_FIELD_POLARITY_METHOD1
-        if (vsync.vbls & 1 && B(1)) {
-            ErrorF(" <- resyncing field polarity M1 ->\n");
-            vsync.trim = VBL_TEMPLATE | VBL_SET_TRIM | VBL_DEC_RATE | VBL_RSYNC_FPOLAR;
-            if (ioctl(fd, DRM_IOCTL_RADEON_VSYNC, &vsync)) {
-                ErrorF("DRM_IOCTL_RADEON_VSYNC: %s\n", strerror(errno)); exit(-1);
-            }
-            VBL_SUB(vsync.tv_now, vsync.tv_vbl, skew);
-        } else {
-#endif
-            VBL_SUB(vsync.tv_now, vsync.tv_vbl, skew)
-            if (skew_prev.tv_sec != ~0) {
-		sync_point_disp += skew.tv_usec - SYNC_POINT;
-                VBL_SUB(skew, skew_prev, drift_speed);
-                VBL_TV2USEC(drift_speed, tmp);
-                ds_usecs += tmp;
-		++cnt;
-            }
-            if (skew_prev.tv_sec != ~0 && !(cnt % SYNC_PLL_DIVIDER)) {
-                sync_point_disp /= SYNC_PLL_DIVIDER;
-#ifdef RESYNC_FIELD_POLARITY_METHOD2
-                if (vsync.vbls & 1 && B(1)) {
-                    ErrorF(" <- resyncing field polarity M2 ->\n");
-                    sync_point_disp = sync_point_disp < 0 ? SYNC_POINT : -SYNC_POINT;
-                }
-#endif
-                ErrorF("sync point displacement: %10d\n", sync_point_disp);
-                ErrorF("drift speed:             %10d %s\n", ds_usecs, abs(ds_usecs) > 10000 ? "excessive drift speed" : "");
-                if (B(1)) {
-                    int trim = (ds_usecs + sync_point_disp) / VBL_MIN_STEP_USEC;
-                    ErrorF("overall compensation:    %10d %s\n", trim, abs(trim) <= 1 ? "completed" : "");
-                    trim = max(trim, -VBL_MAX_TRIM_REL);
-                    trim = min(trim,  VBL_MAX_TRIM_REL);
-                    trim += (vsync.trim & 0xff) * (vsync.trim & VBL_INC_RATE ? -1 : 1);
-                    trim = max(trim, -VBL_MIN_TRIM_ABS);
-                    trim = min(trim,  VBL_MAX_TRIM_ABS);
-                    vsync.trim = VBL_TEMPLATE | VBL_SET_TRIM | (trim >= 0 ? VBL_DEC_RATE | trim : VBL_INC_RATE | -trim);
-                    if (ioctl(fd, DRM_IOCTL_RADEON_VSYNC, &vsync)) {
-                        ErrorF("DRM_IOCTL_RADEON_VSYNC: %s\n", strerror(errno)); exit(-1);
-                    }
-                }
-                sync_point_disp = 0;
-                ds_usecs = 0;
-            }
-#ifdef RESYNC_FIELD_POLARITY_METHOD1
-        }
-#endif
-        skew_prev = skew;
-/* --8<-- */
-
-    }
-    vsync_prev = vsync;
-}
-#endif
 }
 
 
@@ -3136,6 +2953,10 @@ RADEONPutImage(
    BoxRec dstBox;
    uint32_t tmp;
    xf86CrtcPtr crtc;
+
+#ifdef SYNC_FIELDS
+    vga_sync_fields();
+#endif
 
    /*
     * s2offset, s3offset - byte offsets into U and V plane of the
@@ -4211,4 +4032,200 @@ switch(pPriv->encoding){
                 return;
         }       
 }
+
+#ifdef SYNC_FIELDS
+
+/*
+ * prefilter to prevent stray updates.
+ * our software PLL will not try to lock for these.
+ */
+#define SYNC_FRAME_CYCLE 40000
+#define SYNC_FIELD_CYCLE 20000
+#define SYNC_CATCH_RANGE 10000
+
+/* --8<-- */
+/*
+ * we average 25 frames to yield a cycle time of
+ * about one second for analysis of frame rate data.
+ * this serves as frequency divider for our software PLL.
+ */
+#ifdef STANDALONE
+#define SYNC_PLL_DIVIDER 1
+#else
+#define SYNC_PLL_DIVIDER 25
+#endif
+
+/*
+ * offset in usecs from double buffer switch where we try to place double
+ * buffer updates.
+ * this lowers sensivity to jitter of our software PLL phase comparator.
+ */
+#define SYNC_POINT 20000
+
+/*
+ * one trim increment compensates drift speed for about 29usec/sec.
+ * this represents resolution of our VCO input. 
+ */
+#define VBL_MIN_STEP_USEC 300
+
+/* NOT CURRENTLY USED
+ * to allow for smooth adaption also on slower devices we delimit maximum
+ * trim change per step size.
+ * this implements some kind of low pass filter for our VCO input.
+ */
+#define VBL_MAX_TRIM_REL 1000
+
+/*
+ * maximum absolute trim values allowed due to current
+ * hardware/driver contraints.
+ * this delimits 'maximum voltage' being fed into our software PLL.
+ */
+#define VBL_MAX_TRIM_ABS 37
+#define VBL_MIN_TRIM_ABS 37
+#define VBL_RSYNC_FPOLAR 140
+
+/*
+ * field polarity correction is clearly a task of the calling layer
+ * but for the moment we want to provide an all-in-one solution
+ *
+ *  METHOD1 (fast):
+ *  tries to resynchronize field polarity in one fell swoop 
+ *  by heavily incrementing the frame rate for a moment.
+ *  this effectively drops a field.
+ *
+ *  METHOD2 (slow):
+ *  continuously increments frame rate until a field
+ *  has been skipped. 
+ *
+ *  at most one of both methods is allowed at any time
+ */
+//#define RESYNC_FIELD_POLARITY_METHOD1
+//#define RESYNC_FIELD_POLARITY_METHOD2
+
+//#define DEBUG
+#ifdef DEBUG
+#define ERRORF ErrorF
+#else
+#define ERRORF(...)
+#endif
+
+#ifdef STANDALONE
+#define ErrorF printf
+#define B(a) (*(argv + (a)) ? *(argv + (a)) : 0)
+#else
+#define B(a) (a)
+#endif
+/* --8<-- */
+
+void
+vga_sync_fields()
+{
+    static int fd;
+    static int cnt;
+    static int ds_usecs;
+    static int sync_point_disp;
+    static struct timeval skew_prev;
+    static drm_radeon_vsync_t vsync_prev;
+    drm_radeon_vsync_t vsync;
+    drm_radeon_setparam_t vbl_activate;
+    struct timeval filter;
+    struct timeval skew;
+    struct timeval drift_speed;
+    int tmp;
+
+    if (!fd) {
+        if ((fd = drmOpen("radeon", 0)) < 0) {
+            ErrorF("drmOpen: %s\n", strerror(errno));
+        }
+        vbl_activate.param = RADEON_SETPARAM_VBLANK_CRTC;
+        vbl_activate.value = DRM_RADEON_VBLANK_CRTC1;
+        if (ioctl(fd, DRM_IOCTL_RADEON_SETPARAM, &vbl_activate)) {
+            ErrorF("DRM_IOCTL_RADEON_SETPARAM: %s\n", strerror(errno));
+        }
+    }
+    vsync.trim = 0;
+    if (ioctl(fd, DRM_IOCTL_RADEON_VSYNC, &vsync)) {
+        ErrorF("DRM_IOCTL_RADEON_VSYNC: %s\n", strerror(errno));
+    }
+    VBL_SUB(vsync.tv_now, vsync_prev.tv_now, filter);
+    if (filter.tv_sec 
+     || filter.tv_usec > SYNC_FRAME_CYCLE + SYNC_CATCH_RANGE 
+     || filter.tv_usec < SYNC_FRAME_CYCLE - SYNC_CATCH_RANGE) {
+
+	/*
+	 * toss stray intervals and reset
+	 */
+        cnt = 0;
+	ds_usecs = 0;
+        sync_point_disp = 0;
+	skew_prev.tv_sec = ~0;
+
+	ERRORF("RESET STRAY\n");
+    } else {
+
+/* --8<-- */
+#ifdef RESYNC_FIELD_POLARITY_METHOD1
+        if (vsync.vbls & 1 && B(1)) {
+            ErrorF(" <- resyncing field polarity M1 ->\n");
+            vsync.trim = VBL_TEMPLATE | VBL_SET_TRIM | VBL_DEC_RATE | VBL_RSYNC_FPOLAR;
+            if (ioctl(fd, DRM_IOCTL_RADEON_VSYNC, &vsync)) {
+                ErrorF("DRM_IOCTL_RADEON_VSYNC: %s\n", strerror(errno)); exit(-1);
+            }
+            VBL_SUB(vsync.tv_now, vsync.tv_vbl, skew);
+        } else {
+#endif
+            if (vsync.vbls & 1) {
+                struct drm_wait_vblank_request vbr;
+
+                vbr.type = _DRM_VBLANK_ABSOLUTE;
+                vbr.sequence = vsync.vbls + 1;
+                vbr.signal = 0;
+                if (ioctl(fd, DRM_IOCTL_WAIT_VBLANK, &vbr)) {
+                    ErrorF("DRM_IOCTL_WAIT_VBLANK: %s\n", strerror(errno));
+                }
+            }
+            VBL_SUB(vsync.tv_now, vsync.tv_vbl, skew)
+            if (skew_prev.tv_sec != ~0) {
+		sync_point_disp += skew.tv_usec - SYNC_POINT;
+                VBL_SUB(skew, skew_prev, drift_speed);
+                VBL_TV2USEC(drift_speed, tmp);
+                ds_usecs += tmp;
+		++cnt;
+            }
+            if (skew_prev.tv_sec != ~0 && !(cnt % SYNC_PLL_DIVIDER)) {
+                sync_point_disp /= SYNC_PLL_DIVIDER;
+#ifdef RESYNC_FIELD_POLARITY_METHOD2
+                if (vsync.vbls & 1 && B(1)) {
+                    ErrorF(" <- resyncing field polarity M2 ->\n");
+                    sync_point_disp = sync_point_disp < 0 ? SYNC_POINT : -SYNC_POINT;
+                }
+#endif
+                ErrorF("sync point displacement: %10d\n", sync_point_disp);
+                ErrorF("drift speed:             %10d %s\n", ds_usecs, abs(ds_usecs) > 10000 ? "excessive drift speed" : "");
+                if (B(1)) {
+                    int trim = (ds_usecs + sync_point_disp) / VBL_MIN_STEP_USEC;
+                    ErrorF("overall compensation:    %10d %s\n", trim, abs(trim) <= 1 ? "completed" : "");
+                    trim = max(trim, -VBL_MAX_TRIM_REL);
+                    trim = min(trim,  VBL_MAX_TRIM_REL);
+                    trim += (vsync.trim & 0xff) * (vsync.trim & VBL_INC_RATE ? -1 : 1);
+                    trim = max(trim, -VBL_MIN_TRIM_ABS);
+                    trim = min(trim,  VBL_MAX_TRIM_ABS);
+                    vsync.trim = VBL_TEMPLATE | VBL_SET_TRIM | (trim >= 0 ? VBL_DEC_RATE | trim : VBL_INC_RATE | -trim);
+                    if (ioctl(fd, DRM_IOCTL_RADEON_VSYNC, &vsync)) {
+                        ErrorF("DRM_IOCTL_RADEON_VSYNC: %s\n", strerror(errno)); exit(-1);
+                    }
+                }
+                sync_point_disp = 0;
+                ds_usecs = 0;
+            }
+#ifdef RESYNC_FIELD_POLARITY_METHOD1
+        }
+#endif
+        skew_prev = skew;
+/* --8<-- */
+
+    }
+    vsync_prev = vsync;
+}
+#endif
 
