@@ -4161,6 +4161,7 @@ vga_sync_fields()
         ErrorF("DRM_IOCTL_RADEON_SYNCF: %s\n", strerror(errno));
     }
     VSF_SUB(syncf.tv_now, syncf_prev.tv_now, filter);
+    syncf_prev = syncf;
     if (filter.tv_sec 
      || filter.tv_usec > SYF_FRAME_CYCLE + SYF_CATCH_RANGE 
      || filter.tv_usec < SYF_FRAME_CYCLE - SYF_CATCH_RANGE) {
@@ -4244,7 +4245,6 @@ loop:
 /* --- 8< --- */
 
     }
-    syncf_prev = syncf;
 }
 
 #endif
