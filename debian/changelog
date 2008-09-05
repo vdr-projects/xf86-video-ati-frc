@@ -1,3 +1,10 @@
+xserver-xorg-video-ati (1:6.9.0-1+lenny4) unstable; urgency=low
+
+  * Revert "Make sure video offerlay offsets don't exceed the hardware
+            limit of 128 MB", closes: #496979.
+
+ -- Brice Goglin <bgoglin@debian.org>  Fri, 05 Sep 2008 18:42:32 +0200
+
 xserver-xorg-video-ati (1:6.9.0-1+lenny3) unstable; urgency=low
 
   * Cherry-pick patches from the upstream git repository:
