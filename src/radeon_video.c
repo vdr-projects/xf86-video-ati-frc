@@ -4035,41 +4035,47 @@ switch(pPriv->encoding){
 
 #ifdef VGA_SYNC_FIELDS
 
+/* --- 8< --- */
 /*
  * prefilter to prevent stray updates.
  * our software PLL will not try to lock for these.
  */
-#define SYF_FRAME_CYCLE 40000
 #define SYF_CATCH_RANGE 18000
 
-/* --- 8< --- */
+/*
+ * updates outside time window defined by this
+ * value spawn warnings when in debug mode
+ */
+#define SYF_STRAY_WARN 10000
+
 /*
  * we average 25 frames to yield a cycle time of
  * about one second for analysis of frame rate data.
  * this serves as frequency divider for our software PLL.
  */
-#ifdef STANDALONE
-#define SYF_PLL_DIVIDER 10
-#else
 #define SYF_PLL_DIVIDER 25
-#endif
+
+/*
+ * frame cycle duration in usecs for 25 fps
+ */
+#define SYF_FRAME_CYCLE 40000
 
 /*
  * offset in usecs from double buffer switch where we try to place double
  * buffer updates.
  * this lowers sensivity to jitter of our software PLL phase comparator.
  */
-#define SYF_SYNC_POINT 20000
+#define SYF_SYNC_POINT (SYF_FRAME_CYCLE >> 1)
 
 /*
  * one trim increment compensates drift speed for about 29usec/sec.
- * this represents resolution of our VCO input.
+ * this represents resolution of our VCO input. 
  */
 #define SYF_MIN_STEP_USEC 100
 
 /*
  * factor weighting drift against sync point displacement
- * when calculating overall compensation
+ * when calculating overall compensation 
  */
 #define SYF_DISP_DRIFT_FACTOR 1
 
@@ -4087,11 +4093,18 @@ switch(pPriv->encoding){
  */
 #define SYF_MAX_TRIM_ABS 37
 
-//#define DEBUG
+#define DEBUG
 #ifdef DEBUG
 #define ERRORF ErrorF
 #else
 #define ERRORF(...)
+#endif
+
+#define USE_METER
+#ifdef USE_METER
+#define OUT_GRAPHIC meter_out
+#else
+#define OUT_GRAPHIC(...)
 #endif
 
 #ifdef STANDALONE
@@ -4101,31 +4114,23 @@ switch(pPriv->encoding){
 #define B(a) (a)
 #endif
 
-#define USE_METER
-#ifdef USE_METER
-#define OUT_ERRORF(...)
-#define OUT_GRAPHIC meter_out
-#else
-#define OUT_ERRORF ErrorF
-#define OUT_GRAPHIC(...)
-#endif
-
 void
-meter_out(val, symb) 
+meter_out(val, symb)
 {
     static char meter[81];
+    static char headr[81] = "|<- -20ms                               0                              +20ms ->|";
 
-    if (!symb) {
-	ErrorF("%s\n", meter);
-	memset(meter, '-', 80);
-	return;
+    if (!symb || symb == 1) {
+    	if (!symb) ErrorF("%s", headr);
+        if (symb == 1) ErrorF("%s", meter);
+        memset(meter, '-', 80);
+        return;
     }
     val /= 500;
     val = min(val,  39);
     val = max(val, -40);
     meter[40 + val] = symb;
 }
-
 /* --- 8< --- */
 
 void
@@ -4133,17 +4138,17 @@ vga_sync_fields()
 {
     static int fd;
     static int cnt;
+    static int sum;
     static int trim;
     static int ds_usecs;
     static int sync_point_disp;
     static struct timeval skew_prev;
     static drm_radeon_syncf_t syncf_prev;
 
-    drm_radeon_syncf_t syncf;
-    drm_radeon_setparam_t vbl_activate;
-    struct timeval filter;
     struct timeval skew;
     struct timeval drift_speed;
+    drm_radeon_syncf_t syncf;
+    drm_radeon_setparam_t vbl_activate;
     int tmp;
 
     if (!fd) {
@@ -4156,29 +4161,43 @@ vga_sync_fields()
             ErrorF("DRM_IOCTL_RADEON_SETPARAM: %s\n", strerror(errno));
         }
     }
-    syncf.trim = 0;
-    if (ioctl(fd, DRM_IOCTL_RADEON_SYNCF, &syncf)) {
-        ErrorF("DRM_IOCTL_RADEON_SYNCF: %s\n", strerror(errno));
-    }
-    VSF_SUB(syncf.tv_now, syncf_prev.tv_now, filter);
-    syncf_prev = syncf;
-    if (filter.tv_sec 
-     || filter.tv_usec > SYF_FRAME_CYCLE + SYF_CATCH_RANGE 
-     || filter.tv_usec < SYF_FRAME_CYCLE - SYF_CATCH_RANGE) {
-
-	/*
-	 * toss stray intervals and reset
-	 */
-        cnt = 0;
-	trim = 0;
-	ds_usecs = 0;
-        sync_point_disp = 0;
-	skew_prev.tv_sec = ~0;
-
-	ErrorF("RESET STRAY: %10d.%06d\n", (int)filter.tv_sec, (int)filter.tv_usec);
-    } else {
 
 /* --- 8< --- */
+        syncf.trim = 0;
+        if (ioctl(fd, DRM_IOCTL_RADEON_SYNCF, &syncf)) {
+            ErrorF("DRM_IOCTL_RADEON_SYNCF: %s\n", strerror(errno));
+        }
+        VSF_SUB(syncf.tv_now, syncf_prev.tv_now, drift_speed);
+        VSF_TV2USEC(drift_speed, tmp);
+#ifdef STANDALONE
+        if (syncf_prev.tv_now.tv_sec) {
+            usleepv += SYF_FRAME_CYCLE - tmp;
+        }
+#endif
+        syncf_prev = syncf;
+        if (tmp < SYF_FRAME_CYCLE - SYF_CATCH_RANGE || tmp > SYF_FRAME_CYCLE + SYF_CATCH_RANGE) {
+
+            /*
+             * toss stray intervals and reset
+             */
+            cnt = 0;
+            sum = 0;
+            trim = 0;
+            ds_usecs = 0;
+            sync_point_disp = 0;
+            skew_prev.tv_sec = ~0;
+            OUT_GRAPHIC(0, 0);
+            ErrorF("      R               %11d\n", tmp);
+#ifdef STANDALONE
+            goto main_loop_end;
+#else
+            return;
+#endif
+        }
+        if (tmp < SYF_FRAME_CYCLE - SYF_STRAY_WARN || tmp > SYF_FRAME_CYCLE + SYF_STRAY_WARN) {
+	    OUT_GRAPHIC(0, 0);
+	    ErrorF("      W               %11d\n", tmp);
+        }
 #ifndef STANDALONE
         if (syncf.vbls & 1) {
             struct drm_wait_vblank_request vbr;
@@ -4187,16 +4206,17 @@ loop:
             vbr.sequence = syncf.vbls + 1;
             vbr.signal = 0;
             if (ioctl(fd, DRM_IOCTL_WAIT_VBLANK, &vbr)) {
-                ErrorF("DRM_IOCTL_WAIT_VBLANK: %s\n", strerror(errno));
-	    }
-	    if (((struct drm_wait_vblank_reply *)&vbr)->sequence < syncf.vbls + 1) {
-	        /* AFTER EINTR */
-		goto loop;
-	    }
+//                ErrorF("DRM_IOCTL_WAIT_VBLANK: %s\n", strerror(errno));
+            }
+            if (((struct drm_wait_vblank_reply *)&vbr)->sequence < syncf.vbls + 1) {
+                /* AFTER EINTR */
+                goto loop;
+            }
         }
 #endif
         VSF_SUB(syncf.tv_now, syncf.tv_vbl, skew)
         if (skew_prev.tv_sec != ~0) {
+            sum += tmp;
             sync_point_disp += skew.tv_usec - SYF_SYNC_POINT;
             VSF_SUB(skew, skew_prev, drift_speed);
             VSF_TV2USEC(drift_speed, tmp);
@@ -4205,47 +4225,38 @@ loop:
         }
         if (skew_prev.tv_sec != ~0 && !(cnt % SYF_PLL_DIVIDER)) {
             sync_point_disp /= SYF_PLL_DIVIDER;
-            ERRORF("\n");
-            ERRORF("tv now:           %10d.%06d\n", (int)syncf.tv_now.tv_sec, (int)syncf.tv_now.tv_usec);
-            ERRORF("tv vbl:           %10d.%06d\n", (int)syncf.tv_vbl.tv_sec, (int)syncf.tv_vbl.tv_usec);
-            ERRORF("vbls:                    %10d\n", syncf.vbls);
-            ERRORF("trim:                    0x%08x\n", syncf.trim);
-            OUT_ERRORF("sync point displacement: %10d\n", sync_point_disp);
-            OUT_ERRORF("drift speed:             %10d %s\n", ds_usecs, abs(ds_usecs) > 15000 ? "excessive drift speed" : "");
-	    OUT_GRAPHIC(0, '+');
-	    OUT_GRAPHIC(sync_point_disp, '|');
-	    OUT_GRAPHIC(ds_usecs, '*');
-	    OUT_GRAPHIC(0, 0);
-            if (B(1)) {
-                trim = (ds_usecs + sync_point_disp / SYF_DISP_DRIFT_FACTOR) / SYF_MIN_STEP_USEC;
-                OUT_ERRORF("overall compensation:    %10d %s\n", trim, abs(trim) <= 1 ? "completed" : "");
-                trim = max(trim, -SYF_MAX_TRIM_REL);
-                trim = min(trim,  SYF_MAX_TRIM_REL);
-                ERRORF("o. c. clipped:           %10d\n", trim);
-            }
+            OUT_GRAPHIC(0, '+');
+            OUT_GRAPHIC(sync_point_disp, '|');
+            OUT_GRAPHIC(ds_usecs, '*');
+            OUT_GRAPHIC(0, 1);
+
+	    trim = (ds_usecs + sync_point_disp / SYF_DISP_DRIFT_FACTOR) / SYF_MIN_STEP_USEC;
+	    trim = max(trim, -SYF_MAX_TRIM_REL);
+	    trim = min(trim,  SYF_MAX_TRIM_REL);
+	    ERRORF("%7d %7d [%3d%+4d] %7d\n", ds_usecs, sync_point_disp, (char)(syncf.trim & 0xff), trim, sum);
+
             sync_point_disp = 0;
             ds_usecs = 0;
+            sum = 0;
         }
-	if (trim) {
-	    tmp = (char)(syncf.trim & 0xff);
-	    if (trim > 0) {
-		tmp = min(tmp + 1,  SYF_MAX_TRIM_ABS);
-		--trim;
-	    } else {
-		tmp = max(tmp - 1, -SYF_MAX_TRIM_ABS);
-		++trim;
-	    }
-	    syncf.trim = VSF_SET_TRIM | VSF_TEMPLATE | tmp & 0xff;
-	    ERRORF("*trim:                   0x%08x\n", syncf.trim);
-	    if (ioctl(fd, DRM_IOCTL_RADEON_SYNCF, &syncf)) {
-		ErrorF("DRM_IOCTL_RADEON_SYNCF: %s\n", strerror(errno));
-	    }
-	}
+        if (B(1) && trim) {
+            tmp = (char)(syncf.trim & 0xff);
+            if (trim > 0) {
+                tmp = min(tmp + 1,  SYF_MAX_TRIM_ABS);
+                --trim;
+            } else {
+                tmp = max(tmp - 1, -SYF_MAX_TRIM_ABS);
+                ++trim;
+            }
+            syncf.trim = VSF_SET_TRIM | VSF_TEMPLATE | tmp & 0xff;
+            /*ErrorF("*trim:                   0x%08x\n", syncf.trim);*/
+            if (ioctl(fd, DRM_IOCTL_RADEON_SYNCF, &syncf)) {
+                ErrorF("DRM_IOCTL_RADEON_SYNCF: %s\n", strerror(errno));
+            }
+        }
         skew_prev = skew;
 /* --- 8< --- */
 
-    }
 }
-
 #endif
 
