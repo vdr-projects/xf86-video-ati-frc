@@ -2955,7 +2955,7 @@ RADEONPutImage(
    xf86CrtcPtr crtc;
 
 #ifdef VGA_SYNC_FIELDS
-    vga_sync_fields();
+    vga_sync_fields(info->dri->drmFD, info->MMIO);
 #endif
 
    /*
@@ -4063,7 +4063,7 @@ switch(pPriv->encoding){
 /*
  * offset in usecs from double buffer switch where we try to place double
  * buffer updates.
- * this lowers sensivity to jitter of our software PLL phase comparator.
+ * this minimizes sensivity to jitter of our software PLL phase comparator.
  */
 #define SYF_SYNC_POINT (SYF_FRAME_CYCLE >> 1)
 
@@ -4073,7 +4073,7 @@ switch(pPriv->encoding){
  */
 #define SYF_MIN_STEP_USEC 100
 
-/*
+/* NOT CURRENTLY USED
  * factor weighting drift against sync point displacement
  * when calculating overall compensation 
  */
@@ -4134,9 +4134,10 @@ meter_out(val, symb)
 /* --- 8< --- */
 
 void
-vga_sync_fields()
+vga_sync_fields(fd, RADEONMMIO)
+    unsigned char *RADEONMMIO;
 {
-    static int fd;
+    static int vbl_refcnt;
     static int cnt;
     static int sum;
     static int trim;
@@ -4147,19 +4148,17 @@ vga_sync_fields()
 
     struct timeval skew;
     struct timeval drift_speed;
+    struct drm_modeset_ctl vbl_activate;
     drm_radeon_syncf_t syncf;
-    drm_radeon_setparam_t vbl_activate;
     int tmp;
 
-    if (!fd) {
-        if ((fd = drmOpen("radeon", 0)) < 0) {
-            ErrorF("drmOpen: %s\n", strerror(errno));
-        }
-        vbl_activate.param = RADEON_SETPARAM_VBLANK_CRTC;
-        vbl_activate.value = DRM_RADEON_VBLANK_CRTC1;
-        if (ioctl(fd, DRM_IOCTL_RADEON_SETPARAM, &vbl_activate)) {
-            ErrorF("DRM_IOCTL_RADEON_SETPARAM: %s\n", strerror(errno));
-        }
+    if (!vbl_refcnt) {
+	vbl_activate.crtc = VSF_CRTC;
+	vbl_activate.cmd = _DRM_PRE_MODESET;
+	if (ioctl(fd, DRM_IOCTL_MODESET_CTL, &vbl_activate)) {
+	    ErrorF("DRM_IOCTL_MODESET_CTL: %s\n", strerror(errno));
+	}
+	++vbl_refcnt;
     }
 
 /* --- 8< --- */
@@ -4167,6 +4166,14 @@ vga_sync_fields()
         if (ioctl(fd, DRM_IOCTL_RADEON_SYNCF, &syncf)) {
             ErrorF("DRM_IOCTL_RADEON_SYNCF: %s\n", strerror(errno));
         }
+#if 0
+        ErrorF("%10d %10d %10d %10d %10d\n",
+            (int)syncf.tv_now.tv_sec,
+            (int)syncf.tv_now.tv_usec,
+            (int)syncf.tv_vbl.tv_sec,
+            (int)syncf.tv_vbl.tv_usec,
+            syncf.trim);
+#endif
         VSF_SUB(syncf.tv_now, syncf_prev.tv_now, drift_speed);
         VSF_TV2USEC(drift_speed, tmp);
 #ifdef STANDALONE
@@ -4199,20 +4206,13 @@ vga_sync_fields()
 	    ErrorF("      W               %11d\n", tmp);
         }
 #ifndef STANDALONE
-        if (syncf.vbls & 1) {
-            struct drm_wait_vblank_request vbr;
-loop:
-            vbr.type = _DRM_VBLANK_ABSOLUTE;
-            vbr.sequence = syncf.vbls + 1;
-            vbr.signal = 0;
-            if (ioctl(fd, DRM_IOCTL_WAIT_VBLANK, &vbr)) {
-//                ErrorF("DRM_IOCTL_WAIT_VBLANK: %s\n", strerror(errno));
-            }
-            if (((struct drm_wait_vblank_reply *)&vbr)->sequence < syncf.vbls + 1) {
-                /* AFTER EINTR */
-                goto loop;
-            }
-        }
+{
+	int vline = (INREG(RADEON_CRTC_VLINE_CRNT_VLINE) & RADEON_CRTC_CRNT_VLINE_MASK) >> RADEON_CRTC_CRNT_VLINE_SHIFT;
+	int stat = INREG(RADEON_CRTC_STATUS) & RADEON_CRTC_CURRENT_FIELD;
+	if (!stat) {
+	    usleep(64 * (311 - (vline >> 1) + 1));
+	}
+}
 #endif
         VSF_SUB(syncf.tv_now, syncf.tv_vbl, skew)
         if (skew_prev.tv_sec != ~0) {
