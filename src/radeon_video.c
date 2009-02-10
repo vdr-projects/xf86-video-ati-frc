@@ -286,14 +286,6 @@ void RADEONInitVideo(ScreenPtr pScreen)
     memcpy(newAdaptors, adaptors, num_adaptors * sizeof(XF86VideoAdaptorPtr));
     adaptors = newAdaptors;
 
-#define ENABLE_XV_OVERLAY_ADAPTOR
-
-/*
- * enable this if you either want to use
- *   - recent xine-lib versions that let choose you adaptor type by configuration
- *   - XV overlay adaptor type
- */
-#ifdef ENABLE_XV_OVERLAY_ADAPTOR
     if (!IS_AVIVO_VARIANT) {
 	overlayAdaptor = RADEONSetupImageVideo(pScreen);
 	if (overlayAdaptor != NULL) {
@@ -303,9 +295,7 @@ void RADEONInitVideo(ScreenPtr pScreen)
 	    xf86DrvMsg(pScrn->scrnIndex, X_ERROR, "Failed to set up overlay video\n");
 	RADEONInitOffscreenImages(pScreen);
     }
-#else
-    xf86DrvMsg(pScrn->scrnIndex, X_INFO, "XV overlay adaptor disabled by #define\n");
-#endif
+
     if (info->ChipFamily != CHIP_FAMILY_RV250) {
 	if ((info->ChipFamily < CHIP_FAMILY_RS400)
 #ifdef XF86DRI
@@ -2955,7 +2945,7 @@ RADEONPutImage(
    xf86CrtcPtr crtc;
 
 #ifdef VGA_SYNC_FIELDS
-    vga_sync_fields(info->dri->drmFD, info->MMIO);
+    vga_sync_fields(info->drmFD, info->MMIO);
 #endif
 
    /*
@@ -4037,28 +4027,44 @@ switch(pPriv->encoding){
 
 /* --- 8< --- */
 /*
+ * field cycle duration in usecs for PAL
+ */
+#define SYF_PAL_FIELD_CYCLE 20000
+
+/*
+ * frame cycle duration in usecs for PAL
+ */
+#define SYF_PAL_FRAME_CYCLE (SYF_PAL_FIELD_CYCLE << 1)
+
+/*
+ * dependent on interlaced (progressive) input frame rate 25 (50) fps
+ * we set this to 0 (1). other params should adjust accordingly.
+ */
+#define SYF_INPUT_DOUBLE_RATE 0
+
+/*
  * prefilter to prevent stray updates.
  * our software PLL will not try to lock for these.
  */
-#define SYF_CATCH_RANGE 18000
+#define SYF_CATCH_RANGE (18000 >> SYF_INPUT_DOUBLE_RATE)
 
 /*
  * updates outside time window defined by this
  * value spawn warnings when in debug mode
  */
-#define SYF_STRAY_WARN 10000
+#define SYF_WARN_RANGE (15000 >> SYF_INPUT_DOUBLE_RATE)
 
 /*
- * we average 25 frames to yield a cycle time of
+ * we average 25 (50) frames to yield a cycle time of
  * about one second for analysis of frame rate data.
  * this serves as frequency divider for our software PLL.
  */
-#define SYF_PLL_DIVIDER 25
+#define SYF_PLL_DIVIDER (25 << SYF_INPUT_DOUBLE_RATE)
 
 /*
- * frame cycle duration in usecs for 25 fps
+ * input frame cycle duration in usecs for 25 (50) fps
  */
-#define SYF_FRAME_CYCLE 40000
+#define SYF_FRAME_CYCLE (SYF_PAL_FRAME_CYCLE >> SYF_INPUT_DOUBLE_RATE)
 
 /*
  * offset in usecs from double buffer switch where we try to place double
@@ -4090,6 +4096,7 @@ switch(pPriv->encoding){
  * maximum absolute trim values allowed due to current
  * hardware/driver contraints.
  * this delimits 'maximum voltage' controlling our VCO.
+ * currently allowed range is defined symmetrically around the center voltage.
  */
 #define SYF_MAX_TRIM_ABS 37
 
@@ -4110,9 +4117,20 @@ switch(pPriv->encoding){
 #ifdef STANDALONE
 #define ErrorF printf
 #define B(a) (*(argv + (a)) ? *(argv + (a)) : 0)
+#define min(a, b) ((a) <= (b) ? (a) : (b))
+#define max(a, b) ((a) >= (b) ? (a) : (b))
+#define abs(a) ((a) >= 0 ? (a) : -(a))
 #else
 #define B(a) (a)
 #endif
+
+typedef struct _syf {
+    int cnt; 
+    int tsum; 
+    int trim; 
+    int drift; 
+    int spoint;
+} syf_t;
 
 void
 meter_out(val, symb)
@@ -4121,7 +4139,7 @@ meter_out(val, symb)
     static char headr[81] = "|<- -20ms                               0                              +20ms ->|";
 
     if (!symb || symb == 1) {
-    	if (!symb) ErrorF("%s", headr);
+	if (!symb) ErrorF("%s", headr);
         if (symb == 1) ErrorF("%s", meter);
         memset(meter, '-', 80);
         return;
@@ -4138,25 +4156,21 @@ vga_sync_fields(fd, RADEONMMIO)
     unsigned char *RADEONMMIO;
 {
     static int vbl_refcnt;
-    static int cnt;
-    static int sum;
-    static int trim;
-    static int ds_usecs;
-    static int sync_point_disp;
-    static struct timeval skew_prev;
+    static syf_t syf, syf_clear;
+    static struct timeval skew2vbl_prev;
     static drm_radeon_syncf_t syncf_prev;
 
-    struct timeval skew;
-    struct timeval drift_speed;
-    struct drm_modeset_ctl vbl_activate;
     drm_radeon_syncf_t syncf;
-    int tmp;
+    struct timeval skew2vbl;
+    struct timeval tv_usecs;
+    int usecs;
+    struct drm_modeset_ctl vbl_activate;
 
     if (!vbl_refcnt) {
 	vbl_activate.crtc = VSF_CRTC;
 	vbl_activate.cmd = _DRM_PRE_MODESET;
 	if (ioctl(fd, DRM_IOCTL_MODESET_CTL, &vbl_activate)) {
-	    ErrorF("DRM_IOCTL_MODESET_CTL: %s\n", strerror(errno));
+	    ErrorF("DRM_IOCTL_MODESET_CTL: %s\n", strerror(errno)); exit(-1);
 	}
 	++vbl_refcnt;
     }
@@ -4164,97 +4178,90 @@ vga_sync_fields(fd, RADEONMMIO)
 /* --- 8< --- */
         syncf.trim = 0;
         if (ioctl(fd, DRM_IOCTL_RADEON_SYNCF, &syncf)) {
-            ErrorF("DRM_IOCTL_RADEON_SYNCF: %s\n", strerror(errno));
+            ErrorF("DRM_IOCTL_RADEON_SYNCF: %s\n", strerror(errno)); exit(-1);
         }
-#if 0
-        ErrorF("%10d %10d %10d %10d %10d\n",
-            (int)syncf.tv_now.tv_sec,
-            (int)syncf.tv_now.tv_usec,
-            (int)syncf.tv_vbl.tv_sec,
-            (int)syncf.tv_vbl.tv_usec,
-            syncf.trim);
-#endif
-        VSF_SUB(syncf.tv_now, syncf_prev.tv_now, drift_speed);
-        VSF_TV2USEC(drift_speed, tmp);
+	VSF_SUB(syncf.tv_now, syncf_prev.tv_now, tv_usecs);
+	VSF_TV2USEC(tv_usecs, usecs);
 #ifdef STANDALONE
-        if (syncf_prev.tv_now.tv_sec) {
-            usleepv += SYF_FRAME_CYCLE - tmp;
-        }
+	if (syncf_prev.tv_now.tv_sec) {
+	    usleepv += SYF_FRAME_CYCLE - usecs;
+	}
 #endif
-        syncf_prev = syncf;
-        if (tmp < SYF_FRAME_CYCLE - SYF_CATCH_RANGE || tmp > SYF_FRAME_CYCLE + SYF_CATCH_RANGE) {
+	syncf_prev = syncf;
+	if (abs(usecs - SYF_FRAME_CYCLE) > SYF_CATCH_RANGE) {
 
-            /*
-             * toss stray intervals and reset
-             */
-            cnt = 0;
-            sum = 0;
-            trim = 0;
-            ds_usecs = 0;
-            sync_point_disp = 0;
-            skew_prev.tv_sec = ~0;
+	    /*
+	     * toss stray intervals and reset
+	     */
+	    syf = syf_clear;
+	    skew2vbl_prev.tv_sec = ~0;
             OUT_GRAPHIC(0, 0);
-            ErrorF("      R               %11d\n", tmp);
+	    ErrorF("      R               %11d\n", usecs);
 #ifdef STANDALONE
-            goto main_loop_end;
+	    goto main_loop_end;
 #else
-            return;
+	    return;
 #endif
-        }
-        if (tmp < SYF_FRAME_CYCLE - SYF_STRAY_WARN || tmp > SYF_FRAME_CYCLE + SYF_STRAY_WARN) {
-	    OUT_GRAPHIC(0, 0);
-	    ErrorF("      W               %11d\n", tmp);
-        }
+	}
+	if (abs(usecs - SYF_FRAME_CYCLE) > SYF_WARN_RANGE) {
+            OUT_GRAPHIC(0, 0);
+	    ErrorF("      W               %11d\n", usecs);
+	}
+
 #ifndef STANDALONE
 {
-	int vline = (INREG(RADEON_CRTC_VLINE_CRNT_VLINE) & RADEON_CRTC_CRNT_VLINE_MASK) >> RADEON_CRTC_CRNT_VLINE_SHIFT;
-	int stat = INREG(RADEON_CRTC_STATUS) & RADEON_CRTC_CURRENT_FIELD;
-	if (!stat) {
-	    usleep(64 * (311 - (vline >> 1) + 1));
-	}
+        /*
+         * we must delay the next double buffer update
+         * until even field has been processed. 
+         */
+        int vline = (INREG(RADEON_CRTC_VLINE_CRNT_VLINE) & RADEON_CRTC_CRNT_VLINE_MASK) >> RADEON_CRTC_CRNT_VLINE_SHIFT;
+        int stat = INREG(RADEON_CRTC_STATUS) & RADEON_CRTC_CURRENT_FIELD;
+        if (!stat) {
+            usleep(64 * (311 - (vline >> 1) + 1));
+        }
 }
 #endif
-        VSF_SUB(syncf.tv_now, syncf.tv_vbl, skew)
-        if (skew_prev.tv_sec != ~0) {
-            sum += tmp;
-            sync_point_disp += skew.tv_usec - SYF_SYNC_POINT;
-            VSF_SUB(skew, skew_prev, drift_speed);
-            VSF_TV2USEC(drift_speed, tmp);
-            ds_usecs += tmp;
-            ++cnt;
-        }
-        if (skew_prev.tv_sec != ~0 && !(cnt % SYF_PLL_DIVIDER)) {
-            sync_point_disp /= SYF_PLL_DIVIDER;
+	VSF_SUB(syncf.tv_now, syncf.tv_vbl, skew2vbl)
+	if (skew2vbl_prev.tv_sec != ~0) {
+	    syf.tsum += usecs;
+	    syf.spoint += skew2vbl.tv_usec - SYF_SYNC_POINT;
+	    VSF_SUB(skew2vbl, skew2vbl_prev, tv_usecs);
+	    VSF_TV2USEC(tv_usecs, usecs);
+	    syf.drift += usecs;
+	    ++syf.cnt;
+	}
+	if (skew2vbl_prev.tv_sec != ~0 && !(syf.cnt % SYF_PLL_DIVIDER)) {
+	    syf.spoint /= SYF_PLL_DIVIDER;
             OUT_GRAPHIC(0, '+');
-            OUT_GRAPHIC(sync_point_disp, '|');
-            OUT_GRAPHIC(ds_usecs, '*');
+            OUT_GRAPHIC(syf.spoint, '|');
+            OUT_GRAPHIC(syf.drift, '*');
             OUT_GRAPHIC(0, 1);
 
-	    trim = (ds_usecs + sync_point_disp / SYF_DISP_DRIFT_FACTOR) / SYF_MIN_STEP_USEC;
-	    trim = max(trim, -SYF_MAX_TRIM_REL);
-	    trim = min(trim,  SYF_MAX_TRIM_REL);
-	    ERRORF("%7d %7d [%3d%+4d] %7d\n", ds_usecs, sync_point_disp, (char)(syncf.trim & 0xff), trim, sum);
+	    syf.trim = (syf.drift + syf.spoint / SYF_DISP_DRIFT_FACTOR) / SYF_MIN_STEP_USEC;
+	    syf.trim = max(syf.trim, -SYF_MAX_TRIM_REL);
+	    syf.trim = min(syf.trim,  SYF_MAX_TRIM_REL);
+	    ERRORF("%7d %7d [%3d%+4d] %7d\n", syf.drift, syf.spoint, 
+	    			(char)(syncf.trim & 0xff), syf.trim, syf.tsum);
+	    syf.spoint = 0;
+	    syf.drift = 0;
+	    syf.tsum = 0;
+	}
+        if (B(1) && syf.trim) {
+            int t = (char)(syncf.trim & 0xff);
 
-            sync_point_disp = 0;
-            ds_usecs = 0;
-            sum = 0;
-        }
-        if (B(1) && trim) {
-            tmp = (char)(syncf.trim & 0xff);
-            if (trim > 0) {
-                tmp = min(tmp + 1,  SYF_MAX_TRIM_ABS);
-                --trim;
+            if (syf.trim > 0) {
+                t = min(t + 1,  SYF_MAX_TRIM_ABS);
+                --syf.trim;
             } else {
-                tmp = max(tmp - 1, -SYF_MAX_TRIM_ABS);
-                ++trim;
+                t = max(t - 1, -SYF_MAX_TRIM_ABS);
+                ++syf.trim;
             }
-            syncf.trim = VSF_SET_TRIM | VSF_TEMPLATE | tmp & 0xff;
-            /*ErrorF("*trim:                   0x%08x\n", syncf.trim);*/
+            syncf.trim = VSF_SET_TRIM | VSF_TEMPLATE | t & 0xff;
             if (ioctl(fd, DRM_IOCTL_RADEON_SYNCF, &syncf)) {
-                ErrorF("DRM_IOCTL_RADEON_SYNCF: %s\n", strerror(errno));
+                ErrorF("DRM_IOCTL_RADEON_SYNCF: %s\n", strerror(errno)); exit(-1);
             }
-        }
-        skew_prev = skew;
+	}
+        skew2vbl_prev = skew2vbl;
 /* --- 8< --- */
 
 }
