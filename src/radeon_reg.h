@@ -470,9 +470,7 @@
 
 #define RADEON_CRTC2_PITCH                  0x032c
 #define RADEON_CRTC_STATUS                  0x005c
-#ifdef VGA_SYNC_FIELDS
 #       define RADEON_CRTC_CURRENT_FIELD    (1 << 3)
-#endif
 #       define RADEON_CRTC_VBLANK_SAVE      (1 <<  1)
 #       define RADEON_CRTC_VBLANK_SAVE_CLEAR  (1 <<  1)
 #define RADEON_CRTC2_STATUS                  0x03fc
@@ -502,9 +500,7 @@
 #       define RADEON_CRTC2_V_DISP_SHIFT    16
 #define RADEON_CRTC_VLINE_CRNT_VLINE        0x0210
 #       define RADEON_CRTC_CRNT_VLINE_MASK  (0x7ff << 16)
-#ifdef VGA_SYNC_FIELDS
 #	define RADEON_CRTC_CRNT_VLINE_SHIFT 16
-#endif
 #define RADEON_CRTC2_CRNT_FRAME             0x0314
 #define RADEON_CRTC2_GUI_TRIG_VLINE         0x0318
 #define RADEON_CRTC2_STATUS                 0x03fc

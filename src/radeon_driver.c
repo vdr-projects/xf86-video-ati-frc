@@ -111,6 +111,8 @@
 #include "radeon_chipset_gen.h"
 
 
+#include <errno.h>
+#include "sys/resource.h"
 #include "radeon_chipinfo_gen.h"
 
 				/* Forward definitions for driver functions */
@@ -192,7 +194,10 @@ static const OptionInfoRec RADEONOptions[] = {
     { OPTION_IGNORE_LID_STATUS, "IgnoreLidStatus", OPTV_BOOLEAN, {0}, FALSE },
     { OPTION_DEFAULT_TVDAC_ADJ, "DefaultTVDACAdj", OPTV_BOOLEAN, {0}, FALSE },
     { OPTION_INT10,             "Int10",           OPTV_BOOLEAN, {0}, FALSE },
-    { -1,                    NULL,               OPTV_NONE,    {0}, FALSE }
+    { OPTION_SYNC_FIELDS,    "SyncFields",         OPTV_BOOLEAN, {0}, FALSE },
+    { OPTION_SCHED_PRIO,     "SF_SchedPrio",       OPTV_INTEGER, {0}, FALSE },
+    { OPTION_SYF_DEBUG,      "SF_Debug",           OPTV_BOOLEAN, {0}, FALSE },
+    { -1,                    NULL,                 OPTV_NONE,    {0}, FALSE }
 };
 
 const OptionInfoRec *RADEONOptionsWeak(void) { return RADEONOptions; }
@@ -2663,6 +2668,7 @@ Bool RADEONPreInit(ScrnInfoPtr pScrn, int flags)
     int crtc_max_X, crtc_max_Y;
     RADEONEntPtr pRADEONEnt;
     DevUnion* pPriv;
+    MessageType from = X_PROBED;
 
     xf86DrvMsgVerb(pScrn->scrnIndex, X_INFO, RADEON_LOGLEVEL_DEBUG,
 		   "RADEONPreInit\n");
@@ -2941,6 +2947,61 @@ Bool RADEONPreInit(ScrnInfoPtr pScrn, int flags)
       goto fail;
    }
 
+    /* read sync fields options */
+    if (xf86GetOptValBool(info->Options, OPTION_SYNC_FIELDS, &info->sync_fields)) {
+      from = X_CONFIG;
+    } else {
+      info->sync_fields = TRUE;
+      from = X_DEFAULT;
+    }
+    xf86DrvMsg(pScrn->scrnIndex, from, "sync fields %sactivated\n",
+		info->sync_fields ? "" : "de");
+    if (xf86GetOptValInteger(info->Options, OPTION_SCHED_PRIO, &info->SchedPrio)) {
+      from = X_CONFIG;
+    } else {
+      info->SchedPrio = 0;
+      from = X_DEFAULT;
+    }
+    xf86DrvMsg(pScrn->scrnIndex, from, "scheduling priority requested %d\n",
+                 info->SchedPrio);
+    if (xf86GetOptValBool(info->Options, OPTION_SYF_DEBUG, &info->SYF_debug)) {
+      from = X_CONFIG;
+    } else {
+      info->SYF_debug = FALSE;
+      from = X_DEFAULT;
+    }
+    xf86DrvMsg(pScrn->scrnIndex, from, "sync fields debug %sactivated\n",
+		info->SYF_debug ? "" : "de");
+
+    /* control sync fields options consistency */
+    if (!(pScrn->currentMode->Flags & V_INTERLACE)
+     && info->sync_fields) {
+      xf86DrvMsg(pScrn->scrnIndex, X_ERROR, "Cannot support sync fields on non interlaced displays, disabled\n");
+      info->sync_fields = 0;
+    }
+
+    /*
+     * sync_fields only works with
+     * Modeline  "720x576_50i"      13.875   720  744  808  888   576  580  585  625  -hsync -vsync interlace
+     */
+    if ((pScrn->currentMode->Clock != 13875
+     ||  pScrn->currentMode->HDisplay != 720
+     ||  pScrn->currentMode->VDisplay != 576)
+     &&  info->sync_fields) {
+       xf86DrvMsg(pScrn->scrnIndex, X_ERROR, "Cannot support sync fields with current timing, disabled\n");
+       info->sync_fields = 0;
+    }
+    if (info->sync_fields) {
+      if (info->SchedPrio) {
+          if (setpriority(PRIO_PROCESS, 0, info->SchedPrio)) {
+            xf86DrvMsg(pScrn->scrnIndex, X_ERROR,
+                "failed to setpriority as requested: %s\n", strerror(errno));
+          } else {
+            xf86DrvMsg(pScrn->scrnIndex, X_INFO,
+                "set scheduling priority to %d\n", getpriority(PRIO_PROCESS, 0));
+          }
+      }
+    }
 
 				/* Free int10 info */
     if (pInt10)

@@ -8,16 +8,12 @@
 #include <stdio.h>
 #include <math.h>
 
-#define VGA_SYNC_FIELDS
-
-#ifdef VGA_SYNC_FIELDS
 #define _RADEON_COMMON_H_
 #include <errno.h>
 #include <sys/ioctl.h>
 #include <xf86drm.h>
 #include <drm/radeon_drm.h>
 extern void vga_sync_fields();
-#endif
 
 #include "radeon.h"
 #include "radeon_reg.h"
@@ -2870,8 +2866,11 @@ RADEONDisplayVideo(
     OUTREG(RADEON_OV0_P23_V_ACCUM_INIT, p23_v_accum_init);
     OUTREG(RADEON_OV0_P23_H_ACCUM_INIT, p23_h_accum_init);
 
-   scale_cntl = RADEON_SCALER_VERT_PICK_NEAREST | RADEON_SCALER_ADAPTIVE_DEINT | RADEON_SCALER_DOUBLE_BUFFER 
+   scale_cntl = RADEON_SCALER_ADAPTIVE_DEINT | RADEON_SCALER_DOUBLE_BUFFER 
         | RADEON_SCALER_ENABLE | RADEON_SCALER_SMART_SWITCH | (0x7f<<16) | scaler_src;
+   if (info->sync_fields) {
+       scale_cntl |= RADEON_SCALER_VERT_PICK_NEAREST;
+   }
    switch(id){
         case FOURCC_UYVY:
 		scale_cntl |= RADEON_SCALER_SOURCE_YVYU422;
@@ -2944,9 +2943,9 @@ RADEONPutImage(
    uint32_t tmp;
    xf86CrtcPtr crtc;
 
-#ifdef VGA_SYNC_FIELDS
-    vga_sync_fields(info->drmFD, info->MMIO);
-#endif
+   if (info->sync_fields) {
+	vga_sync_fields(info->drmFD, info->MMIO);
+   }
 
    /*
     * s2offset, s3offset - byte offsets into U and V plane of the
@@ -4023,8 +4022,6 @@ switch(pPriv->encoding){
         }       
 }
 
-#ifdef VGA_SYNC_FIELDS
-
 /* --- 8< --- */
 /*
  * field cycle duration in usecs for PAL
@@ -4164,14 +4161,14 @@ vga_sync_fields(fd, RADEONMMIO)
     struct timeval skew2vbl;
     struct timeval tv_usecs;
     int usecs;
-    struct drm_modeset_ctl vbl_activate;
+    drm_radeon_setparam_t vbl_activate;
 
     if (!vbl_refcnt) {
-	vbl_activate.crtc = VSF_CRTC;
-	vbl_activate.cmd = _DRM_PRE_MODESET;
-	if (ioctl(fd, DRM_IOCTL_MODESET_CTL, &vbl_activate)) {
-	    ErrorF("DRM_IOCTL_MODESET_CTL: %s\n", strerror(errno)); exit(-1);
-	}
+        vbl_activate.param = RADEON_SETPARAM_VBLANK_CRTC;
+        vbl_activate.value = DRM_RADEON_VBLANK_CRTC1;
+        if (ioctl(fd, DRM_IOCTL_RADEON_SETPARAM, &vbl_activate)) {
+            ErrorF("DRM_IOCTL_RADEON_SETPARAM: %s\n", strerror(errno));
+        }
 	++vbl_refcnt;
     }
 
@@ -4265,5 +4262,3 @@ vga_sync_fields(fd, RADEONMMIO)
 /* --- 8< --- */
 
 }
-#endif
-
