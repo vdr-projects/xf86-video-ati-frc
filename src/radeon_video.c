@@ -2944,7 +2944,7 @@ RADEONPutImage(
    xf86CrtcPtr crtc;
 
    if (info->sync_fields) {
-	vga_sync_fields(info->drmFD, info->MMIO);
+	vga_sync_fields(info);
    }
 
    /*
@@ -4149,32 +4149,30 @@ meter_out(val, symb)
 /* --- 8< --- */
 
 void
-vga_sync_fields(fd, RADEONMMIO)
-    unsigned char *RADEONMMIO;
+vga_sync_fields(info)
+    RADEONInfoPtr info;
 {
-    static int vbl_refcnt;
     static syf_t syf, syf_clear;
     static struct timeval skew2vbl_prev;
     static drm_radeon_syncf_t syncf_prev;
+    static drm_radeon_setparam_t vbl_activate;
 
     drm_radeon_syncf_t syncf;
     struct timeval skew2vbl;
     struct timeval tv_usecs;
     int usecs;
-    drm_radeon_setparam_t vbl_activate;
 
-    if (!vbl_refcnt) {
+    if (!vbl_activate.param) {
         vbl_activate.param = RADEON_SETPARAM_VBLANK_CRTC;
         vbl_activate.value = DRM_RADEON_VBLANK_CRTC1;
-        if (ioctl(fd, DRM_IOCTL_RADEON_SETPARAM, &vbl_activate)) {
+        if (ioctl(info->drmFD, DRM_IOCTL_RADEON_SETPARAM, &vbl_activate)) {
             ErrorF("DRM_IOCTL_RADEON_SETPARAM: %s\n", strerror(errno));
         }
-	++vbl_refcnt;
     }
 
 /* --- 8< --- */
         syncf.trim = 0;
-        if (ioctl(fd, DRM_IOCTL_RADEON_SYNCF, &syncf)) {
+        if (ioctl(info->drmFD, DRM_IOCTL_RADEON_SYNCF, &syncf)) {
             ErrorF("DRM_IOCTL_RADEON_SYNCF: %s\n", strerror(errno)); exit(-1);
         }
 	VSF_SUB(syncf.tv_now, syncf_prev.tv_now, tv_usecs);
@@ -4211,6 +4209,7 @@ vga_sync_fields(fd, RADEONMMIO)
          * we must delay the next double buffer update
          * until even field has been processed. 
          */
+	unsigned char *RADEONMMIO = info->MMIO;
         int vline = (INREG(RADEON_CRTC_VLINE_CRNT_VLINE) & RADEON_CRTC_CRNT_VLINE_MASK) >> RADEON_CRTC_CRNT_VLINE_SHIFT;
         int stat = INREG(RADEON_CRTC_STATUS) & RADEON_CRTC_CURRENT_FIELD;
         if (!stat) {
@@ -4229,16 +4228,19 @@ vga_sync_fields(fd, RADEONMMIO)
 	}
 	if (skew2vbl_prev.tv_sec != ~0 && !(syf.cnt % SYF_PLL_DIVIDER)) {
 	    syf.spoint /= SYF_PLL_DIVIDER;
-            OUT_GRAPHIC(0, '+');
-            OUT_GRAPHIC(syf.spoint, '|');
-            OUT_GRAPHIC(syf.drift, '*');
-            OUT_GRAPHIC(0, 1);
-
+	    if (info->SYF_debug) {
+		OUT_GRAPHIC(0, '+');
+		OUT_GRAPHIC(syf.spoint, '|');
+		OUT_GRAPHIC(syf.drift, '*');
+		OUT_GRAPHIC(0, 1);
+	    }
 	    syf.trim = (syf.drift + syf.spoint / SYF_DISP_DRIFT_FACTOR) / SYF_MIN_STEP_USEC;
 	    syf.trim = max(syf.trim, -SYF_MAX_TRIM_REL);
 	    syf.trim = min(syf.trim,  SYF_MAX_TRIM_REL);
-	    ERRORF("%7d %7d [%3d%+4d] %7d\n", syf.drift, syf.spoint, 
-	    			(char)(syncf.trim & 0xff), syf.trim, syf.tsum);
+	    if (info->SYF_debug) {
+		ERRORF("%7d %7d [%3d%+4d] %7d\n", syf.drift, syf.spoint, 
+				    (char)(syncf.trim & 0xff), syf.trim, syf.tsum);
+	    }
 	    syf.spoint = 0;
 	    syf.drift = 0;
 	    syf.tsum = 0;
@@ -4254,7 +4256,7 @@ vga_sync_fields(fd, RADEONMMIO)
                 ++syf.trim;
             }
             syncf.trim = VSF_SET_TRIM | VSF_TEMPLATE | t & 0xff;
-            if (ioctl(fd, DRM_IOCTL_RADEON_SYNCF, &syncf)) {
+            if (ioctl(info->drmFD, DRM_IOCTL_RADEON_SYNCF, &syncf)) {
                 ErrorF("DRM_IOCTL_RADEON_SYNCF: %s\n", strerror(errno)); exit(-1);
             }
 	}
