@@ -872,7 +872,6 @@ RADEONInitCrtcRegisters(xf86CrtcPtr crtc, RADEONSavePtr save,
     int    hsync_start;
     int    hsync_wid;
     int    vsync_wid;
-    int    fix_inter;  
 
     switch (info->CurrentLayout.pixel_code) {
     case 4:  format = 1; break;
@@ -924,17 +923,14 @@ RADEONInitCrtcRegisters(xf86CrtcPtr crtc, RADEONSavePtr save,
 				     ? RADEON_CRTC_H_SYNC_POL
 				     : 0));
 
-				/* fixup for interlaced modes */
-    fix_inter = (mode->Flags & V_INTERLACE) ? 2 : 1;
-
 				/* This works for double scan mode. */
-    save->crtc_v_total_disp = (((mode->CrtcVTotal * fix_inter - 1) & 0xffff)
-			       | ((mode->CrtcVDisplay * fix_inter - 1) << 16));
+    save->crtc_v_total_disp = (((mode->CrtcVTotal - 1) & 0xffff)
+			       | ((mode->CrtcVDisplay - 1) << 16));
 
     vsync_wid = mode->CrtcVSyncEnd - mode->CrtcVSyncStart;
     if (!vsync_wid)       vsync_wid = 1;
 
-    save->crtc_v_sync_strt_wid = (((mode->CrtcVSyncStart * fix_inter - 1) & 0xfff)
+    save->crtc_v_sync_strt_wid = (((mode->CrtcVSyncStart - 1) & 0xfff)
 				  | ((vsync_wid & 0x1f) << 16)
 				  | ((mode->Flags & V_NVSYNC)
 				     ? RADEON_CRTC_V_SYNC_POL

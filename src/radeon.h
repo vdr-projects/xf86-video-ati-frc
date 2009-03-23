@@ -204,10 +204,7 @@ typedef enum {
     OPTION_TVSTD,
     OPTION_IGNORE_LID_STATUS,
     OPTION_DEFAULT_TVDAC_ADJ,
-    OPTION_INT10,
-    OPTION_SYNC_FIELDS,
-    OPTION_SCHED_PRIO,
-    OPTION_SYF_DEBUG,
+    OPTION_INT10
 } RADEONOpts;
 
 
@@ -804,10 +801,6 @@ typedef struct {
 
     Bool              r600_shadow_fb;
     void *fb_shadow;
-
-    Bool sync_fields;
-    int SchedPrio;
-    Bool SYF_debug;
 
     int num_gb_pipes;
     Bool has_tcl;
